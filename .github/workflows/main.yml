@@ -27,6 +27,8 @@ jobs:
             git reset --hard origin/main
             git pull origin main
 
+            echo "PORT=${{ secrets.PORT }}" > .env
+
             cd /gamehub
 
             docker compose down

@@ -7,7 +7,7 @@ const path = require('node:path');
 
 const { createWerewolvesApp } = require('../../games/werewolves/server');
 
-const PORT = Number(process.env.PORT || 3001);
+const PORT = Number(process.env.PORT || 3004);
 const HOST = process.env.HOST || '0.0.0.0';
 const ROOT_DIR = path.resolve(__dirname, '..', '..');
 const HOME_PUBLIC_DIR = path.join(ROOT_DIR, 'apps', 'home', 'public');
