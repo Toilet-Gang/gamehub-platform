@@ -4,9 +4,8 @@ services:
     working_dir: /app
     command: npm start
     environment:
-      HOST: 0.0.0.0
-      PORT: 3000
+      - PORT=3004
     ports:
-      - "3000:3000"
+      - "3004:3004"
     volumes:
       - .:/app
