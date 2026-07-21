@@ -1,0 +1,46 @@
+name: Deploy Gamehub Platform
+
+on:
+  push:
+    branches:
+      - main
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+      - name: Pull latest changes
+        uses: appleboy/ssh-action@master
+        with:
+          host: ${{ secrets.HOST }}
+          username: ${{ secrets.USERNAME }}
+          password: ${{ secrets.PASSWORD }}
+          port: 22
+          script: |
+            echo "Pulling latest changes"
+            cd /root/services/gamehub-platform
+
+            git fetch origin main
+            git checkout main
+            git reset --hard origin/main
+            git pull origin main
+
+            cd /gamehub
+
+            docker compose down
+            docker compose up -d
+            echo "Deployment completed successfully"
+      - name: Cleanup
+        uses: appleboy/ssh-action@master
+        with:
+          host: ${{ secrets.HOST }}
+          username: ${{ secrets.USERNAME }}
+          password: ${{ secrets.PASSWORD }}
+          port: 22
+          script: |
+            echo "Cleaning up old Docker images..."
+            docker image prune -f
+            echo "Old Docker images cleaned up successfully!"
+       
