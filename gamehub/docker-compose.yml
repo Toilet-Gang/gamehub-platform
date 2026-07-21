@@ -1,0 +1,12 @@
+services:
+  gamehub:
+    image: node:22-alpine
+    working_dir: /app
+    command: npm start
+    environment:
+      HOST: 0.0.0.0
+      PORT: 3000
+    ports:
+      - "3000:3000"
+    volumes:
+      - .:/app

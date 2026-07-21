@@ -1,0 +1,13 @@
+{
+  "name": "werewolves-gamehub-repo",
+  "version": "1.0.0",
+  "private": true,
+  "scripts": {
+    "start": "npm --prefix gamehub start",
+    "check": "npm --prefix gamehub run check",
+    "start:werewolves": "npm --prefix gamehub run start:werewolves"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}

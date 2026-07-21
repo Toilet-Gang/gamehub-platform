@@ -1,0 +1,14 @@
+{
+  "name": "@gamehub/werewolves",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Trò chơi Ma Sói client-server dùng Node.js thuần.",
+  "scripts": {
+    "start": "node server.js",
+    "ngrok": "ngrok start werewolves --config ngrok.yml",
+    "check": "node --check server.js && node --check public/app.js"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}

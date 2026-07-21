@@ -1,0 +1,8 @@
+{
+  "id": "werewolves",
+  "name": "Ma Soi",
+  "entry": "/games/werewolves/",
+  "settingsScope": "game",
+  "scoreScope": "per-game-session",
+  "status": "ready"
+}

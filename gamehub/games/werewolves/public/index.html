@@ -1,0 +1,21 @@
+<!doctype html>
+<html lang="vi">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Ma Sói Client Server</title>
+    <base href="/games/werewolves/" data-gamehub-base />
+    <script>
+      if (location.pathname === '/' || location.pathname === '/index.html') {
+        document.querySelector('[data-gamehub-base]').setAttribute('href', '/');
+      }
+    </script>
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <main id="app" class="app-shell">
+      <div class="loading">Đang kết nối Quản Trò...</div>
+    </main>
+    <script src="app.js"></script>
+  </body>
+</html>

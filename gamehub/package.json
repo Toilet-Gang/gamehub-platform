@@ -1,0 +1,19 @@
+{
+  "name": "gamehub",
+  "version": "1.0.0",
+  "private": true,
+  "description": "GameHub monorepo with a shared room hub and Werewolves as the first game.",
+  "scripts": {
+    "start": "node apps/server/server.js",
+    "start:werewolves": "node games/werewolves/server.js",
+    "check": "node --check apps/server/server.js && node --check apps/home/public/app.js && node --check games/werewolves/server.js && node --check games/werewolves/public/app.js"
+  },
+  "workspaces": [
+    "apps/*",
+    "games/*",
+    "packages/*"
+  ],
+  "engines": {
+    "node": ">=18"
+  }
+}
