@@ -51,7 +51,7 @@ function renderHostLobby() {
           <div class="stack" style="max-height: 260px; overflow-y: auto;">
             ${store.state.roles.map(role => `
               <div class="field" style="display: flex; align-items: center; justify-content: space-between;">
-                <span>${role.displayName} (${role.groupName}):</span>
+                <span>${getRoleTranslation(role)} (${getGroupTranslation(role.group)}):</span>
                 <input class="input-field" style="width: 70px; text-align: center;" type="number" name="role:${role.id}" value="${settings.roleCounts[role.id] || 0}" min="0" max="${targetCount}" />
               </div>
             `).join('')}
@@ -63,7 +63,8 @@ function renderHostLobby() {
         <button class="btn btn-primary btn-lg" data-action="start-game" ${!settings.readyToStart ? 'disabled' : ''}>
           ${t('startGame')}
         </button>
-        ${settings.errors?.length ? `<div style="color: #fca5a5; font-size: 0.85rem;">⚠️ ${settings.errors[0]}</div>` : ''}
+        ${store.error ? `<div style="color: #fca5a5; font-size: 0.85rem; margin-top: 8px; padding: 8px; background: rgba(220, 38, 38, 0.2); border-radius: 6px;">⚠️ ${store.error}</div>` : ''}
+        ${settings.errors?.length ? `<div style="color: #fca5a5; font-size: 0.85rem; margin-top: 6px;">⚠️ ${settings.errors[0]}</div>` : ''}
 
         <button class="btn btn-outline btn-sm" data-action="close-room" style="margin-top: 10px; border-color: rgba(220, 38, 38, 0.5); color: #fca5a5;">
           ${t('closeRoom')}
@@ -194,8 +195,8 @@ function renderHostEnded() {
           ${store.state.players.map(p => `
             <tr>
               <td><strong>${p.name}</strong></td>
-              <td>${p.role?.displayName || '-'}</td>
-              <td>${p.role?.groupName || '-'}</td>
+              <td>${getRoleTranslation(p.role)}</td>
+              <td>${getGroupTranslation(p.role?.group)}</td>
               <td>${p.alive ? '🟢 ' + t('alive') : '💀 ' + t('dead')}</td>
             </tr>
           `).join('')}

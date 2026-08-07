@@ -103,9 +103,9 @@ function renderPlayerInGame() {
           </div>
 
           <div class="card-back">
-            <h2 style="font-size: 1.5rem; color: var(--crimson);">${role?.displayName || ''}</h2>
-            <div class="pill teal" style="margin: 6px 0;">${role?.groupName || ''}</div>
-            <p style="font-size: 0.88rem; color: var(--text-muted); margin-top: 8px;">${role?.description || ''}</p>
+            <h2 style="font-size: 1.5rem; color: var(--crimson);">${getRoleTranslation(role)}</h2>
+            <div class="pill teal" style="margin: 6px 0;">${getGroupTranslation(role?.group)}</div>
+            <p style="font-size: 0.88rem; color: var(--text-muted); margin-top: 8px;">${getRoleDescTranslation(role)}</p>
             ${self?.wolfPack ? `
               <div style="font-size: 0.85rem; color: #fca5a5; margin-top: 8px;">
                 ${t('wolf_teammates', { names: self.wolfPack.map(w => w.name).join(', ') })}
@@ -269,7 +269,7 @@ function renderPlayerEnded() {
         <h3 style="color: var(--crimson); margin-top: 6px;">${winner?.name || ''}</h3>
         <p class="muted">${winner?.reason || ''}</p>
         <div class="pill teal" style="margin-top: 12px; display: inline-flex;">
-          ${t('roleAssigned')}: ${self?.role?.displayName || ''}
+          ${t('roleAssigned')}: ${getRoleTranslation(self?.role)}
         </div>
       </div>
 
@@ -289,7 +289,7 @@ function renderPlayerEnded() {
             ${store.state.players.map(p => `
               <tr>
                 <td>${p.name}</td>
-                <td>${p.role?.displayName || '-'}</td>
+                <td>${getRoleTranslation(p.role)}</td>
                 <td>${p.alive ? '🟢 ' + t('alive') : '💀 ' + t('dead')}</td>
               </tr>
             `).join('')}

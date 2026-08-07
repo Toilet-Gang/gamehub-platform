@@ -1,0 +1,27 @@
+{
+  "name": "@gamehub/werewolves-next",
+  "version": "2.0.0",
+  "private": true,
+  "description": "Phiên bản Refactor mới của Trò chơi Ma Sói sử dụng TypeScript, Express, Socket.io & React.",
+  "main": "server/src/index.ts",
+  "scripts": {
+    "dev:server": "tsx watch server/src/index.ts",
+    "build:server": "tsc -p server/tsconfig.json",
+    "start": "tsx server/src/index.ts",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "express": "^4.19.2",
+    "socket.io": "^4.7.5"
+  },
+  "devDependencies": {
+    "@types/express": "^4.17.21",
+    "@types/node": "^20.12.0",
+    "tsx": "^4.10.0",
+    "typescript": "^5.4.5",
+    "vitest": "^1.6.0"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}
