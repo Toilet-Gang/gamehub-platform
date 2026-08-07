@@ -1,0 +1,14 @@
+game ma sói auto host, ví dụ có 8 người thì cần 9 máy, 1 máy host để phân role tự động, tts, nhật ký trò chơi. Các máy người chơi thì hiển thị nhật ký các nhân, các hoạt động của các vai trò.
+lấy ví dụ kahoot:
+1/ Phòng chờ:
++ máy host: Hiển thị room code, danh sách người dùng đang đợi
++ máy người chơi: Nhập room code, nhập tên người dùng, hiển thị danh sách người dùng đang đợi
+2/ Bắt đầu:
++ máy host được chọn số lượng người chơi tối đa, chọn các role sẽ có trong trò chơi, khi bắt đầu sẽ phân role ngẫu nhiên cho các máy người chơi.
++ sau khi phân role, các máy người chơi sẽ nhận được role của mình
+3/ Trò chơi:
++ host là người quản lý trò chơi, điều khiển trò chơi
++ các máy người chơi chỉ hiển thị nhật ký của trò chơi
++ tts đọc to các hoạt động của các vai trò
+4/ Kết thúc:
++ hiển thị danh sách người chơi với role tương ứng

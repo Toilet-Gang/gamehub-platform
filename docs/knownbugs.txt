@@ -1,0 +1,5 @@
+những role chết chưa được gọi lại trong đêm sau -> phải gọi
+chưa chia tỉ lệ vote (có vote là chết) -> chia theo tỉ lệ 50%, bất kỳ phiếu nào kể cả phiếu trắng (skip) đều phải trên 50%
+bỏ nhận biết thợ săn kéo theo ai -> không được biết ai chết vì lý do gì
+bỏ nhận biết sói con chết -> bất kể trong đêm hay ngày đều không biết
+bỏ nhận biết bị chọn bởi trưởng giáo phái -> không biết 

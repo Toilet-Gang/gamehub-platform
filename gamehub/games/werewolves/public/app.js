@@ -5,13 +5,16 @@ const TTS_MAX_CHARS = 180;
 const routeParams = new URLSearchParams(window.location.search);
 const routeRoomCode = (routeParams.get('roomCode') || routeParams.get('room') || '').trim().toUpperCase();
 const routeOwnerToken = routeParams.get('ownerToken') || '';
+const routeView = (routeParams.get('view') || routeParams.get('role') || '').trim().toLowerCase();
 
 const store = {
   playerId: localStorage.getItem('werewolves.playerId') || '',
   playerName: localStorage.getItem('werewolves.playerName') || '',
-  roomCode: routeRoomCode || localStorage.getItem('werewolves.roomCode') || '',
+  roomCode: routeRoomCode || (localStorage.getItem('werewolves.playerId') ? localStorage.getItem('werewolves.roomCode') || '' : ''),
+  playerInputRoomCode: routeRoomCode || '',
   ownerToken: routeOwnerToken || (routeRoomCode ? localStorage.getItem(`gamehub.ownerToken.${routeRoomCode}`) || '' : ''),
-  hostedByGameHub: window.location.pathname.startsWith('/games/'),
+  viewMode: routeView === 'host' ? 'host' : routeView === 'player' ? 'player' : localStorage.getItem('werewolves.viewMode') || '',
+  roleFlipped: false,
   state: null,
   error: '',
   info: '',
@@ -19,7 +22,7 @@ const store = {
   currentActionKey: '',
   witchType: '',
   eventSource: null,
-  ttsEnabled: localStorage.getItem('werewolves.tts') === '1',
+  ttsEnabled: localStorage.getItem('werewolves.tts') !== '0', // Default enabled for auto host
   ttsQueue: [],
   ttsAudio: null,
   ttsPlaying: false,
@@ -27,8 +30,20 @@ const store = {
   now: Date.now(),
 };
 
+// Initial setup
+if (!store.viewMode) {
+  if (store.ownerToken) {
+    store.viewMode = 'host';
+  } else if (store.playerId) {
+    store.viewMode = 'player';
+  } else {
+    store.viewMode = 'landing';
+  }
+}
+
 connectEvents();
 refreshState();
+
 setInterval(() => {
   store.now = Date.now();
   if (store.state?.phase === 'day') {
@@ -36,11 +51,10 @@ setInterval(() => {
   }
 }, 1000);
 
+// Global Event Listeners
 app.addEventListener('submit', async (event) => {
   const form = event.target.closest('form');
-  if (!form) {
-    return;
-  }
+  if (!form) return;
 
   event.preventDefault();
 
@@ -48,7 +62,11 @@ app.addEventListener('submit', async (event) => {
     const input = form.querySelector('[name="name"]');
     const roomCodeInput = form.querySelector('[name="roomCode"]');
     store.playerName = input.value.trim();
-    store.roomCode = roomCodeInput?.value.trim().toUpperCase() || store.roomCode;
+    store.playerInputRoomCode = roomCodeInput?.value.trim().toUpperCase() || store.playerInputRoomCode;
+    store.roomCode = store.playerInputRoomCode;
+    store.viewMode = 'player';
+    localStorage.setItem('werewolves.viewMode', 'player');
+
     await runAction(async () => {
       const result = await apiPost('/api/join', {
         name: store.playerName,
@@ -59,19 +77,12 @@ app.addEventListener('submit', async (event) => {
       localStorage.setItem('werewolves.playerId', store.playerId);
       localStorage.setItem('werewolves.playerName', store.playerName);
       localStorage.setItem('werewolves.roomCode', store.roomCode);
-      if (store.ownerToken && store.roomCode) {
-        localStorage.setItem(`gamehub.ownerToken.${store.roomCode}`, store.ownerToken);
-      }
       connectEvents();
       await refreshState();
     });
   }
 
   if (form.id === 'settings-form') {
-    if (!canManageRoom()) {
-      return;
-    }
-
     const formData = new FormData(form);
     const roleCounts = {};
     for (const role of store.state.roles) {
@@ -87,28 +98,39 @@ app.addEventListener('submit', async (event) => {
   }
 });
 
-app.addEventListener('input', (event) => {
-  if (event.target.matches('[name="name"]')) {
-    store.playerName = event.target.value;
-  }
-  if (event.target.matches('[name="roomCode"]')) {
-    store.roomCode = event.target.value.toUpperCase();
-  }
-});
-
 app.addEventListener('click', async (event) => {
   const button = event.target.closest('[data-action]');
-  if (!button || button.disabled) {
+
+  // Flip role card click
+  const flipCard = event.target.closest('.role-card-flip');
+  if (flipCard && !button) {
+    store.roleFlipped = !store.roleFlipped;
+    render();
     return;
   }
 
+  if (!button || button.disabled) return;
+
   const action = button.dataset.action;
+
+  if (action === 'select-view-mode') {
+    store.viewMode = button.dataset.mode;
+    localStorage.setItem('werewolves.viewMode', store.viewMode);
+    render();
+    return;
+  }
+
+  if (action === 'toggle-language') {
+    setLanguage(getLanguage() === 'vi' ? 'en' : 'vi');
+    render();
+    return;
+  }
 
   if (action === 'toggle-tts') {
     store.ttsEnabled = !store.ttsEnabled;
     localStorage.setItem('werewolves.tts', store.ttsEnabled ? '1' : '0');
     if (store.ttsEnabled) {
-      speak('Đã bật đọc lời quản trò bằng giọng Google dịch tiếng Việt.');
+      speak('Đã bật đọc giọng Quản trò tự động.');
     } else {
       stopTts();
     }
@@ -117,17 +139,42 @@ app.addEventListener('click', async (event) => {
   }
 
   if (action === 'start-game') {
-    if (!canManageRoom()) {
-      return;
-    }
     await runAction(() => apiPost('/api/start', {}));
     return;
   }
 
-  if (action === 'reset-game') {
-    if (!canManageRoom()) {
-      return;
+  if (action === 'leave-room') {
+    if (confirm(t('confirmLeaveRoom'))) {
+      await runAction(() => apiPost('/api/leave', { playerId: store.playerId }));
+      localStorage.removeItem('werewolves.playerId');
+      store.playerId = '';
+      store.viewMode = 'landing';
+      localStorage.setItem('werewolves.viewMode', 'landing');
+      render();
     }
+    return;
+  }
+
+  if (action === 'close-room') {
+    if (confirm(t('confirmCloseRoom'))) {
+      await runAction(() => apiPost('/api/close-room', {}));
+      store.info = t('roomClosedInfo');
+      render();
+    }
+    return;
+  }
+
+  if (action === 'skip-night-call') {
+    await runAction(() => apiPost('/api/skip-call', {}));
+    return;
+  }
+
+  if (action === 'force-resolve-day') {
+    await runAction(() => apiPost('/api/force-resolve-day', {}));
+    return;
+  }
+
+  if (action === 'reset-game') {
     await runAction(() => apiPost('/api/reset', {}));
     return;
   }
@@ -138,8 +185,8 @@ app.addEventListener('click', async (event) => {
     return;
   }
 
-  if (action === 'choose-witch') {
-    store.witchType = button.dataset.witchType || '';
+  if (action === 'choose-action-option') {
+    store.selectedOptionType = button.dataset.optionType || '';
     store.selectedTargets = new Set();
     render();
     return;
@@ -150,7 +197,7 @@ app.addEventListener('click', async (event) => {
     return;
   }
 
-  if (action === 'skip-night-action') {
+  if (action === 'skip-player-action') {
     await runAction(() =>
       apiPost('/api/action', {
         playerId: store.playerId,
@@ -181,48 +228,42 @@ app.addEventListener('click', async (event) => {
       }),
     );
     clearSelection();
+    return;
+  }
+});
+
+app.addEventListener('input', (event) => {
+  if (event.target.matches('[name="name"]')) {
+    store.playerName = event.target.value;
+  }
+  if (event.target.matches('[name="roomCode"]')) {
+    store.playerInputRoomCode = event.target.value.toUpperCase();
   }
 });
 
 async function submitNightAction() {
   const privateAction = store.state?.privateAction;
-  if (!privateAction) {
-    return;
-  }
+  if (!privateAction) return;
 
   const targetIds = [...store.selectedTargets];
+  const payloadAction = { targetIds };
 
-  if (privateAction.mode === 'witch') {
-    if (!store.witchType) {
-      store.error = 'Chọn loại thuốc trước khi gửi.';
-      render();
-      return;
-    }
-    await runAction(() =>
-      apiPost('/api/action', {
-        playerId: store.playerId,
-        action: {
-          type: store.witchType,
-          targetIds,
-        },
-      }),
-    );
-  } else {
-    await runAction(() =>
-      apiPost('/api/action', {
-        playerId: store.playerId,
-        action: { targetIds },
-      }),
-    );
+  if (store.selectedOptionType) {
+    payloadAction.type = store.selectedOptionType;
   }
+
+  await runAction(() =>
+    apiPost('/api/action', {
+      playerId: store.playerId,
+      action: payloadAction,
+    }),
+  );
 
   clearSelection();
 }
 
 function toggleTarget(targetId, maxTargets) {
-  if (!targetId) {
-    return;
-  }
+  if (!targetId) return;
 
   if (store.selectedTargets.has(targetId)) {
     store.selectedTargets.delete(targetId);
@@ -244,7 +285,7 @@ function toggleTarget(targetId, maxTargets) {
 function clearSelection() {
   store.selectedTargets = new Set();
   store.currentActionKey = '';
-  store.witchType = '';
+  store.selectedOptionType = '';
   render();
 }
 
@@ -296,9 +337,16 @@ async function apiPost(path, body) {
   return data;
 }
 
+function getDisplayRoomCode() {
+  return store.state?.roomCode || store.state?.settings?.roomCode || store.roomCode || '';
+}
+
 async function refreshState() {
   const response = await fetch(apiUrl('/api/state', { playerId: store.playerId }));
   store.state = await response.json();
+  if (store.state?.roomCode && (store.viewMode === 'host' || (store.playerId && store.state?.self))) {
+    store.roomCode = store.state.roomCode;
+  }
   syncActionKey();
   render();
 }
@@ -313,6 +361,9 @@ function connectEvents() {
 
   events.addEventListener('state', (event) => {
     store.state = JSON.parse(event.data);
+    if (store.state?.roomCode && (store.viewMode === 'host' || (store.playerId && store.state?.self))) {
+      store.roomCode = store.state.roomCode;
+    }
     syncActionKey();
     render();
   });
@@ -321,12 +372,15 @@ function connectEvents() {
     const narration = JSON.parse(event.data);
     if (narration.id !== store.lastNarrationId) {
       store.lastNarrationId = narration.id;
-      speak(narration.text);
+      // Only host machine plays TTS aloud automatically
+      if (store.viewMode === 'host') {
+        speak(narration.text);
+      }
     }
   });
 
   events.onerror = () => {
-    store.info = 'Đang thử kết nối lại với server.';
+    store.info = 'Đang kết nối lại với server...';
     render();
   };
 }
@@ -348,28 +402,21 @@ function syncActionKey() {
 }
 
 function speak(text) {
-  if (!store.ttsEnabled) {
-    return;
-  }
-
+  if (!store.ttsEnabled) return;
   store.ttsQueue.push(...splitTtsText(text));
   playNextTts();
 }
 
 function splitTtsText(text) {
   const normalized = String(text || '').replace(/\s+/g, ' ').trim();
-  if (!normalized) {
-    return [];
-  }
+  if (!normalized) return [];
 
   const chunks = [];
   const sentences = normalized.match(/[^.!?;:]+[.!?;:]?/g) || [normalized];
 
   for (const sentence of sentences) {
     const trimmed = sentence.trim();
-    if (!trimmed) {
-      continue;
-    }
+    if (!trimmed) continue;
 
     if (trimmed.length <= TTS_MAX_CHARS) {
       chunks.push(trimmed);
@@ -386,23 +433,17 @@ function splitTtsText(text) {
         current = next;
       }
     }
-    if (current) {
-      chunks.push(current);
-    }
+    if (current) chunks.push(current);
   }
 
   return chunks;
 }
 
 function playNextTts() {
-  if (store.ttsPlaying || !store.ttsEnabled) {
-    return;
-  }
+  if (store.ttsPlaying || !store.ttsEnabled) return;
 
   const text = store.ttsQueue.shift();
-  if (!text) {
-    return;
-  }
+  if (!text) return;
 
   const audio = new Audio(apiUrl('/api/tts', { text }));
   store.ttsAudio = audio;
@@ -410,13 +451,9 @@ function playNextTts() {
   let done = false;
 
   const finish = () => {
-    if (done) {
-      return;
-    }
+    if (done) return;
     done = true;
-    if (store.ttsAudio === audio) {
-      store.ttsAudio = null;
-    }
+    if (store.ttsAudio === audio) store.ttsAudio = null;
     store.ttsPlaying = false;
     playNextTts();
   };
@@ -429,7 +466,6 @@ function playNextTts() {
 function stopTts() {
   store.ttsQueue = [];
   store.ttsPlaying = false;
-
   if (store.ttsAudio) {
     store.ttsAudio.pause();
     store.ttsAudio.removeAttribute('src');
@@ -438,600 +474,642 @@ function stopTts() {
   }
 }
 
+// MAIN RENDER CONTROLLER
 function render() {
   if (!store.state) {
-    app.innerHTML = '<div class="loading">Đang kết nối Quản Trò...</div>';
+    app.innerHTML = `
+      <div class="loading">
+        <div class="spinner"></div>
+        <div>Đang kết nối Quản Trò...</div>
+      </div>
+    `;
     return;
   }
 
+  if (store.viewMode === 'landing') {
+    app.innerHTML = `
+      ${renderTopbar()}
+      <main class="main-container">
+        ${renderLandingView()}
+      </main>
+    `;
+    return;
+  }
+
+  if (store.viewMode === 'host') {
+    app.innerHTML = `
+      ${renderTopbar()}
+      <main class="main-container">
+        ${renderHostView()}
+      </main>
+    `;
+    return;
+  }
+
+  // Player view default
   app.innerHTML = `
     ${renderTopbar()}
-    <section class="layout">
-      <aside class="sidebar">
-        ${renderJoinPanel()}
-        ${renderPlayersPanel()}
-      </aside>
-      <section class="main">
-        ${renderMainPanel()}
-      </section>
-      <aside class="activity">
-        ${renderPrivateMessages()}
-        ${renderLogPanel()}
-        ${renderRoleBook()}
-      </aside>
-    </section>
+    <main class="main-container">
+      ${renderPlayerView()}
+    </main>
   `;
 }
 
 function renderTopbar() {
-  const state = store.state;
+  const phase = store.state.phase;
+  let phaseText = 'Phòng chờ';
+  let phaseClass = 'amber';
+
+  if (phase === 'night') {
+    phaseText = `Đêm thứ ${store.state.round}`;
+    phaseClass = 'red';
+  } else if (phase === 'day') {
+    phaseText = `Ban ngày thứ ${store.state.round}`;
+    phaseClass = 'teal';
+  } else if (phase === 'ended') {
+    phaseText = 'Kết thúc ván';
+    phaseClass = 'red';
+  }
+
+  const modeBadge = store.viewMode === 'host'
+    ? `<span class="mode-badge host">Màn hình Host</span>`
+    : store.viewMode === 'player'
+      ? `<span class="mode-badge player">Máy người chơi</span>`
+      : '';
+
+  const aliveCount = store.state.players?.filter(p => p.alive).length || 0;
+  const deadCount = store.state.players?.filter(p => !p.alive).length || 0;
+  const showRoomCodePill = store.viewMode === 'host' || (store.playerId && store.state?.self);
+
   return `
     <header class="topbar">
       <div class="brand">
-        <h1>Ma Sói</h1>
+        <div class="brand-logo">
+          <span class="brand-icon">🐺</span>
+          <span>${t('gameTitle')}</span>
+        </div>
+        ${modeBadge}
         <div class="phase-strip">
-          <span class="pill teal">${phaseLabel(state.phase)}</span>
-          <span class="pill">Vòng ${state.round || 0}</span>
-          <span class="pill">${state.playerCount}/${state.settings?.targetPlayerCount || state.playerCount} người chơi</span>
-          ${state.currentCall ? `<span class="pill red">Order ${state.currentCall.order}: ${escapeHtml(state.currentCall.title)}</span>` : ''}
+          <span class="pill ${phaseClass}">${phaseText}</span>
+          <span class="pill teal">❤️ ${t('alive')}: <strong>${aliveCount}</strong></span>
+          <span class="pill red">💀 ${t('dead')}: <strong>${deadCount}</strong></span>
+          ${showRoomCodePill ? `<span class="pill">${t('roomCode')}: <strong>${getDisplayRoomCode()}</strong></span>` : ''}
         </div>
       </div>
+
       <div class="toolbar">
-        <button class="button secondary" type="button" data-action="toggle-tts">${store.ttsEnabled ? 'Tắt TTS' : 'Bật TTS'}</button>
-        <button class="button danger" type="button" data-action="reset-game">Ván mới</button>
+        <button class="btn btn-sm btn-outline" data-action="toggle-language">
+          🌐 ${getLanguage() === 'vi' ? 'English (EN)' : 'Tiếng Việt (VI)'}
+        </button>
+        ${store.viewMode === 'host' ? `
+          <button class="btn btn-sm ${store.ttsEnabled ? 'btn-accent' : 'btn-outline'}" data-action="toggle-tts">
+            ${store.ttsEnabled ? t('hostTTSOn') : t('hostTTSOff')}
+          </button>
+          <button class="btn btn-sm btn-primary" data-action="close-room">
+            ${t('closeRoom')}
+          </button>
+        ` : store.viewMode === 'player' && store.playerId ? `
+          <button class="btn btn-sm btn-outline" data-action="leave-room">
+            ${t('leaveRoom')}
+          </button>
+        ` : ''}
+        <button class="btn btn-sm btn-outline" data-action="select-view-mode" data-mode="landing">
+          ${t('toggleView')}
+        </button>
       </div>
     </header>
   `;
 }
 
-function renderJoinPanel() {
-  const self = store.state.self;
-  const settings = store.state.settings;
-  const canStart = canManageRoom() && store.state.phase === 'lobby' && settings?.readyToStart;
-  const startHint = settings?.errors?.[0] || `Cần đúng ${settings?.targetPlayerCount || store.state.minPlayers} người để bắt đầu.`;
-
+function renderLandingView() {
   return `
-    <section class="panel">
-      <div class="panel-title">
-        <h2>${self ? 'Người chơi' : 'Vào phòng'}</h2>
+    <div class="landing-view">
+      <div class="mode-card host-mode">
+        <div class="mode-card-icon">📺</div>
+        <h2>${t('hostModeTitle')}</h2>
+        <p class="muted">${t('hostModeDesc')}</p>
+        <button class="btn btn-primary" data-action="select-view-mode" data-mode="host">
+          ${t('enterHostMode')}
+        </button>
       </div>
-      <form id="join-form" class="join-form">
-        <label class="field">
-          <span>Tên hiển thị</span>
-          <input name="name" maxlength="40" autocomplete="nickname" value="${escapeAttr(store.playerName || self?.name || '')}" />
-        </label>
-        ${
-          self
-            ? ''
-            : `<label class="field">
-                <span>Mã phòng</span>
-                <input name="roomCode" maxlength="12" autocomplete="one-time-code" value="${escapeAttr(store.roomCode)}" />
-              </label>`
-        }
-        <button class="button full" type="submit">${self ? 'Cập nhật tên' : 'Tham gia'}</button>
-      </form>
-      <div class="stack" style="margin-top: 10px">
-        <button class="button teal full" type="button" data-action="start-game" ${canStart ? '' : 'disabled'}>Bắt đầu ván</button>
-        <div class="small muted">${escapeHtml(startHint)}</div>
+
+      <div class="mode-card player-mode">
+        <div class="mode-card-icon">📱</div>
+        <h2>${t('playerModeTitle')}</h2>
+        <p class="muted">${t('playerModeDesc')}</p>
+        <button class="btn btn-accent" data-action="select-view-mode" data-mode="player">
+          ${t('enterPlayerMode')}
+        </button>
       </div>
-      ${renderNotice()}
-    </section>
+    </div>
   `;
 }
 
-function renderNotice() {
-  if (store.error) {
-    return `<div class="notice error small" style="margin-top: 10px">${escapeHtml(store.error)}</div>`;
+function renderHostView() {
+  const phase = store.state.phase;
+
+  if (phase === 'lobby') {
+    return renderHostLobby();
   }
-  if (store.info) {
-    return `<div class="notice small" style="margin-top: 10px">${escapeHtml(store.info)}</div>`;
+
+  if (phase === 'night' || phase === 'day') {
+    return renderHostInGame();
   }
+
+  if (phase === 'ended') {
+    return renderHostEnded();
+  }
+
   return '';
 }
 
-function canManageRoom() {
-  return !store.hostedByGameHub || Boolean(store.ownerToken);
-}
-
-function renderPlayersPanel() {
+function renderHostLobby() {
+  const settings = store.state.settings;
   const players = store.state.players;
+  const targetCount = settings.targetPlayerCount;
+  const joinedCount = players.length;
+
   return `
-    <section class="panel">
-      <div class="panel-title">
-        <h3>Danh sách</h3>
-        <span class="small muted">${players.filter((player) => player.alive).length} sống</span>
-      </div>
-      <div class="players">
-        ${
-          players.length
-            ? players.map(renderPlayerCard).join('')
-            : '<div class="small muted">Chưa có người chơi.</div>'
-        }
-      </div>
-    </section>
+    <div class="host-dashboard">
+      <aside class="panel">
+        <div class="room-code-banner">
+          <div class="room-code-label">MÃ PHÒNG CHO NGƯỜI CHƠI JOIN</div>
+          <div class="room-code-display">${getDisplayRoomCode()}</div>
+          <div class="room-url-subtext">Đã tham gia: <strong>${joinedCount} / ${targetCount}</strong> người</div>
+        </div>
+
+        <form id="settings-form" class="panel">
+          <div class="panel-title">
+            <h3>Cấu hình Ván chơi</h3>
+          </div>
+
+          <div class="field">
+            <span>Số người chơi dự kiến (${settings.minPlayers} - ${settings.maxPlayers}):</span>
+            <input class="input-field" type="number" name="targetPlayerCount" value="${targetCount}" min="${settings.minPlayers}" max="${settings.maxPlayers}" />
+          </div>
+
+          <div class="panel-title" style="margin-top: 12px;">
+            <h3>Chọn số lượng Role trong game</h3>
+            <span class="muted small">${settings.roleTotal}/${targetCount} vai</span>
+          </div>
+
+          <div class="stack" style="max-height: 260px; overflow-y: auto;">
+            ${store.state.roles.map(role => `
+              <div class="field" style="display: flex; align-items: center; justify-content: space-between;">
+                <span>${role.displayName} (${role.groupName}):</span>
+                <input class="input-field" style="width: 70px; text-align: center;" type="number" name="role:${role.id}" value="${settings.roleCounts[role.id] || 0}" min="0" max="${targetCount}" />
+              </div>
+            `).join('')}
+          </div>
+
+          <button class="btn btn-outline" type="submit" style="margin-top: 8px;">Lưu Cấu Hình</button>
+        </form>
+
+        <button class="btn btn-primary btn-lg" data-action="start-game" ${!settings.readyToStart ? 'disabled' : ''}>
+          🎮 Bắt Đầu Ván & Chia Role Ngẫu Nhiên
+        </button>
+        ${settings.errors?.length ? `<div style="color: #fca5a5; font-size: 0.85rem;">⚠️ ${settings.errors[0]}</div>` : ''}
+
+        <button class="btn btn-outline btn-sm" data-action="close-room" style="margin-top: 10px; border-color: rgba(220, 38, 38, 0.5); color: #fca5a5;">
+          🔴 Giải Thể / Đóng Phòng Chơi
+        </button>
+      </aside>
+
+      <main class="panel">
+        <div class="panel-title">
+          <h2>Danh sách Người chơi ở Phòng Chờ</h2>
+          <span class="muted">${joinedCount} người đã vào</span>
+        </div>
+
+        <div class="player-grid">
+          ${players.map(p => `
+            <div class="player-badge">
+              <div class="player-avatar">${p.name.charAt(0).toUpperCase()}</div>
+              <div class="player-info">
+                <div class="player-name">${p.name}</div>
+                <div class="player-status">${p.connected ? '🟢 Đã kết nối' : '🔴 Mất kết nối'}</div>
+              </div>
+            </div>
+          `).join('')}
+        </div>
+      </main>
+    </div>
   `;
 }
 
-function renderPlayerCard(player) {
-  const roleTag = player.role ? `<span class="tag ${roleClass(player.role)}">${escapeHtml(player.role.displayName)}</span>` : '';
+function renderHostInGame() {
+  const currentCall = store.state.currentCall;
+  const isNight = store.state.phase === 'night';
+  const dayState = store.state.day;
+
   return `
-    <div class="player-card ${player.alive ? '' : 'dead'}">
-      <div>
-        <div class="player-name">${escapeHtml(player.name)}${player.isYou ? ' <span class="muted small">(bạn)</span>' : ''}</div>
-        <div class="player-meta">
-          <span class="tag ${player.alive ? 'live' : 'dead'}">${player.alive ? 'Sống' : 'Chết'}</span>
-          ${roleTag}
-          ${player.deathReason ? `<span class="tag">${escapeHtml(player.deathReason)}</span>` : ''}
+    <div class="host-dashboard">
+      <aside class="panel">
+        <div class="panel-title">
+          <h2>Điều Khiển Quản Trò (Host)</h2>
+        </div>
+
+        ${isNight && currentCall ? `
+          <div class="panel" style="background: rgba(220, 38, 38, 0.15); border-color: rgba(220, 38, 38, 0.4);">
+            <div class="panel-title">
+              <h3>Đang gọi: ${currentCall.title}</h3>
+            </div>
+            <p style="font-size: 0.9rem; color: #fde047; font-style: italic;">"${currentCall.tts}"</p>
+            <div style="font-size: 0.85rem; margin-top: 8px;" class="muted">
+              Đã nhận: ${currentCall.submittedCount} / ${currentCall.expectedCount} người
+            </div>
+            <button class="btn btn-accent btn-sm" data-action="skip-night-call" style="margin-top: 10px;">
+              ⏩ Bỏ qua lượt đêm này (Host Override)
+            </button>
+          </div>
+        ` : ''}
+
+        ${!isNight && dayState ? `
+          <div class="panel" style="background: rgba(16, 185, 129, 0.15); border-color: rgba(16, 185, 129, 0.4);">
+            <div class="panel-title">
+              <h3>Ban ngày - Thảo luận & Bỏ phiếu</h3>
+            </div>
+            <p>Đã bỏ phiếu: ${dayState.votesSubmitted} / ${dayState.aliveCount} người</p>
+            <button class="btn btn-primary btn-sm" data-action="force-resolve-day" style="margin-top: 10px;">
+              ⚖️ Xử lý kết quả Bỏ phiếu ngay
+            </button>
+          </div>
+        ` : ''}
+
+        <button class="btn btn-outline btn-sm" data-action="reset-game" style="margin-top: 14px;">
+          🔄 Tạo Ván Mới
+        </button>
+      </aside>
+
+      <main class="panel">
+        <div class="panel-title">
+          <h2>📜 Nhật Ký Trò Chơi Công Khai</h2>
+        </div>
+
+        <div class="log-box">
+          ${store.state.activityLog.map(item => `
+            <div class="log-item public">
+              <span>${item.text}</span>
+            </div>
+          `).join('')}
+        </div>
+
+        <div class="panel-title" style="margin-top: 16px;">
+          <h3>Trạng thái Người chơi trong ván</h3>
+        </div>
+        <div class="player-grid">
+          ${store.state.players.map(p => `
+            <div class="player-badge" style="${!p.alive ? 'opacity: 0.4; filter: grayscale(1);' : ''}">
+              <div class="player-avatar">${p.name.charAt(0).toUpperCase()}</div>
+              <div class="player-info">
+                <div class="player-name">${p.name}</div>
+                <div class="player-status">${p.alive ? '❤️ Còn sống' : `💀 Chết (${p.deathReason || ''})`}</div>
+              </div>
+            </div>
+          `).join('')}
+        </div>
+      </main>
+    </div>
+  `;
+}
+
+function renderHostEnded() {
+  const winner = store.state.winner;
+
+  return `
+    <div class="panel" style="max-width: 850px; margin: 20px auto; text-align: center;">
+      <h1 style="font-size: 2.4rem; color: var(--amber); margin-bottom: 8px;">🏆 KẾT THÚC VÁN ĐẤU</h1>
+      <h2 style="font-size: 1.6rem; color: var(--crimson);">${winner?.name || 'Ván chơi kết thúc'}</h2>
+      <p class="muted" style="margin-bottom: 20px;">${winner?.reason || ''}</p>
+
+      <div class="panel-title">
+        <h3>BẢNG CÔNG KHAI VAI TRÒ TOÀN BỘ NGƯỜI CHƠI</h3>
+      </div>
+
+      <table class="end-table">
+        <thead>
+          <tr>
+            <th>Tên người chơi</th>
+            <th>Vai trò được chia</th>
+            <th>Phe</th>
+            <th>Trạng thái cuối</th>
+          </tr>
+        </thead>
+        <tbody>
+          ${store.state.players.map(p => `
+            <tr>
+              <td><strong>${p.name}</strong></td>
+              <td>${p.role?.displayName || 'Chưa chia'}</td>
+              <td>${p.role?.groupName || '-'}</td>
+              <td>${p.alive ? '🟢 Còn sống' : `💀 ${p.deathReason || 'Đã chết'}`}</td>
+            </tr>
+          `).join('')}
+        </tbody>
+      </table>
+
+      <button class="btn btn-primary btn-lg" data-action="reset-game" style="margin-top: 24px; width: 100%;">
+        🔄 Bắt Đầu Ván Mới
+      </button>
+    </div>
+  `;
+}
+
+function renderPlayerView() {
+  if (!store.playerId || !store.state.self) {
+    return renderPlayerJoinForm();
+  }
+
+  const phase = store.state.phase;
+
+  if (phase === 'lobby') {
+    return renderPlayerLobby();
+  }
+
+  if (phase === 'night' || phase === 'day') {
+    return renderPlayerInGame();
+  }
+
+  if (phase === 'ended') {
+    return renderPlayerEnded();
+  }
+
+  return '';
+}
+
+function renderPlayerJoinForm() {
+  return `
+    <div class="player-layout">
+      <form id="join-form" class="panel">
+        <div class="panel-title">
+          <h2>Tham Gia Game Ma Sói</h2>
+        </div>
+
+        <div class="field">
+          <span>Mã Phòng:</span>
+          <input class="input-field" type="text" name="roomCode" value="${store.playerInputRoomCode}" placeholder="Nhập mã phòng hiển thị trên màn hình Host" required />
+        </div>
+
+        <div class="field">
+          <span>Tên Người Chơi:</span>
+          <input class="input-field" type="text" name="name" value="${store.playerName}" placeholder="Nhập biệt danh của bạn" required maxLength="40" />
+        </div>
+
+        ${store.error ? `<div style="color: #fca5a5; font-size: 0.9rem;">⚠️ ${store.error}</div>` : ''}
+
+        <button class="btn btn-accent btn-lg" type="submit" style="margin-top: 10px;">
+          🚀 Tham Gia Phòng Chờ
+        </button>
+      </form>
+    </div>
+  `;
+}
+
+function renderPlayerLobby() {
+  const self = store.state.self;
+
+  return `
+    <div class="player-layout">
+      <div class="panel" style="text-align: center;">
+        <h2>Chào ${self.name}! 👋</h2>
+        <p class="muted">Bạn đã ở trong phòng chờ. Vui lòng nhìn lên màn hình Host để xem thông báo bắt đầu.</p>
+        <div class="pill amber" style="margin: 16px auto; display: inline-flex;">
+          ⏳ Đang chờ Host chia vai trò ngẫu nhiên...
+        </div>
+        <div style="margin-top: 10px;">
+          <button class="btn btn-outline btn-sm" data-action="leave-room">
+            🚪 Thoát khỏi phòng này
+          </button>
+        </div>
+      </div>
+
+      <div class="panel">
+        <div class="panel-title">
+          <h3>Người chơi trong phòng</h3>
+          <span class="muted">${store.state.players.length} người</span>
+        </div>
+        <div class="player-grid">
+          ${store.state.players.map(p => `
+            <div class="player-badge">
+              <div class="player-avatar">${p.name.charAt(0).toUpperCase()}</div>
+              <div class="player-name">${p.name} ${p.isYou ? ' (Bạn)' : ''}</div>
+            </div>
+          `).join('')}
         </div>
       </div>
     </div>
   `;
 }
 
-function renderMainPanel() {
-  const state = store.state;
-  if (state.phase === 'lobby') {
-    return renderLobby();
-  }
-  if (state.phase === 'night') {
-    return renderNight();
-  }
-  if (state.phase === 'day') {
-    return renderDay();
-  }
-  if (state.phase === 'ended') {
-    return renderEnded();
-  }
-  return '<section class="hero-status"><h2>Đang chờ Quản Trò</h2></section>';
-}
-
-function renderLobby() {
-  const settings = store.state.settings;
-  return `
-    <section class="hero-status">
-      <h2>Phòng chờ ván Ma Sói</h2>
-      <p>Chọn số người và bộ vai trước khi bắt đầu. Server sẽ chia vai riêng cho từng client.</p>
-      <div class="phase-strip">
-        <span class="pill teal">${store.state.playerCount}/${settings?.targetPlayerCount || store.state.minPlayers} người</span>
-        <span class="pill">${settings?.roleTotal || 0}/${settings?.targetPlayerCount || 0} vai</span>
-        <span class="pill">TTS ${store.ttsEnabled ? 'đang bật' : 'đang tắt'}</span>
-      </div>
-    </section>
-    ${renderRoleSetup()}
-  `;
-}
-
-function renderRoleSetup() {
-  const settings = store.state.settings;
-  if (!settings) {
-    return '';
-  }
-  if (!canManageRoom()) {
-    return '';
-  }
-
-  const seatText =
-    settings.remainingSeats > 0
-      ? `Còn thiếu ${settings.remainingSeats} người`
-      : settings.readyToStart
-        ? 'Đã đủ người'
-        : 'Kiểm tra lại cấu hình';
+function renderPlayerInGame() {
+  const self = store.state.self;
+  const privateAction = store.state.privateAction;
+  const dayState = store.state.day;
+  const role = self?.role;
 
   return `
-    <section class="action-surface">
-      <form id="settings-form" class="role-setup-form">
-        <div class="action-title">
-          <h3>Cấu hình vai trò</h3>
-          <span class="tag">${escapeHtml(seatText)}</span>
-        </div>
-        <div class="settings-head">
-          <label class="field compact">
-            <span>Số người chơi</span>
-            <input
-              name="targetPlayerCount"
-              type="number"
-              min="${settings.minPlayers}"
-              max="${settings.maxPlayers}"
-              value="${settings.targetPlayerCount}"
-            />
-          </label>
-          <div class="setup-stats">
-            <span class="tag role-village">Dân ${settings.groupTotals?.[1] || 0}</span>
-            <span class="tag role-wolf">Sói ${settings.groupTotals?.[2] || 0}</span>
-            <span class="tag role-third">Phe ba ${settings.groupTotals?.[3] || 0}</span>
-            <span class="tag">${settings.roleTotal}/${settings.targetPlayerCount} vai</span>
+    <div class="player-layout">
+      <!-- Flip Role Card -->
+      <div class="role-card-container">
+        <div class="role-card-flip ${store.roleFlipped ? 'flipped' : ''}">
+          <div class="card-front">
+            <h3 style="font-size: 1.4rem; color: var(--amber);">🎴 VAI TRÒ BÍ MẬT CỦA BẠN</h3>
+            <p class="card-instruction">👆 Chạm vào thẻ để lật xem vai trò</p>
+          </div>
+
+          <div class="card-back">
+            <h2 style="font-size: 1.6rem; color: var(--crimson);">${role?.displayName || 'Chưa chia'}</h2>
+            <div class="pill teal" style="margin: 6px 0;">${role?.groupName || ''}</div>
+            <p style="font-size: 0.88rem; color: var(--text-muted); margin-top: 8px;">${role?.description || ''}</p>
+            ${self?.wolfPack ? `
+              <div style="font-size: 0.85rem; color: #fca5a5; margin-top: 8px;">
+                🐺 Đồng đội Sói: ${self.wolfPack.map(w => w.name).join(', ')}
+              </div>
+            ` : ''}
+            <p class="card-instruction">👆 Chạm để ẩn vai trò</p>
           </div>
         </div>
-        <div class="role-count-grid">
-          ${store.state.roles
-            .slice()
-            .sort((a, b) => a.group - b.group || a.order - b.order || a.displayName.localeCompare(b.displayName, 'vi'))
-            .map((role) => renderRoleCountRow(role, settings))
-            .join('')}
+      </div>
+
+      <!-- Action Panel -->
+      ${self?.alive && privateAction ? renderPlayerNightAction(privateAction) : ''}
+      ${self?.alive && dayState && dayState.canVote ? renderPlayerDayVote(dayState) : ''}
+
+      ${!self?.alive ? `
+        <div class="panel" style="background: rgba(220, 38, 38, 0.2); border-color: var(--crimson);">
+          <h3>💀 BẠN ĐÃ CHẾT</h3>
+          <p class="muted">Bạn là linh hồn, giữ im lặng và quan sát diễn biến ván đấu.</p>
         </div>
-        ${renderSettingsErrors(settings)}
-        <div class="action-row">
-          <button class="button teal" type="submit">Lưu cấu hình</button>
+      ` : ''}
+
+      <!-- Personal Log -->
+      <div class="panel">
+        <div class="panel-title">
+          <h3>📖 Nhật Ký Cá Nhân & Hoạt Động</h3>
         </div>
-      </form>
-    </section>
-  `;
-}
-
-function renderRoleCountRow(role, settings) {
-  return `
-    <label class="role-count-row">
-      <span>
-        <strong>${escapeHtml(role.displayName)}</strong>
-        <span class="tag ${roleClass(role)}">${escapeHtml(role.groupName)}</span>
-      </span>
-      <input
-        name="role:${escapeAttr(role.id)}"
-        type="number"
-        min="0"
-        max="${settings.targetPlayerCount}"
-        value="${settings.roleCounts?.[role.id] || 0}"
-      />
-    </label>
-  `;
-}
-
-function renderSettingsErrors(settings) {
-  if (!settings.errors?.length) {
-    return '';
-  }
-
-  return `
-    <div class="settings-errors">
-      ${settings.errors.map((error) => `<div class="notice error small">${escapeHtml(error)}</div>`).join('')}
+        <div class="log-box">
+          ${store.state.privateMessages?.map(msg => `
+            <div class="log-item private">
+              <span>🔒 ${msg}</span>
+            </div>
+          `).join('')}
+          ${store.state.activityLog?.map(item => `
+            <div class="log-item public">
+              <span>📢 ${item.text}</span>
+            </div>
+          `).join('')}
+        </div>
+      </div>
     </div>
   `;
 }
 
-function renderNight() {
-  const call = store.state.currentCall;
-  return `
-    <section class="hero-status">
-      <h2>Đêm ${store.state.round}</h2>
-      <p>${call ? escapeHtml(call.tts) : 'Quản trò đang xử lý kết quả ban đêm.'}</p>
-      ${
-        call
-          ? `<div class="phase-strip">
-              <span class="pill red">Order ${call.order}</span>
-              <span class="pill">${escapeHtml(call.submittedCount)} / ${escapeHtml(call.expectedCount)} đã chọn</span>
-            </div>`
-          : ''
-      }
-    </section>
-    ${renderSelfRole()}
-    ${renderNightAction()}
-  `;
-}
-
-function renderDay() {
-  const day = store.state.day;
-  return `
-    <section class="hero-status">
-      <h2>Ban ngày</h2>
-      <p>Thảo luận còn <span class="countdown">${formatCountdown(day.discussionEndsAt - store.now)}</span>. Khi mọi người đã bỏ phiếu, server tự xử lý treo cổ.</p>
-      <div class="phase-strip">
-        <span class="pill teal">${day.votesSubmitted} / ${day.aliveCount} phiếu</span>
-      </div>
-    </section>
-    ${renderSelfRole()}
-    ${renderDayVote()}
-  `;
-}
-
-function renderEnded() {
-  const winner = store.state.winner;
-  return `
-    <section class="hero-status">
-      <h2>${escapeHtml(winner?.name || 'Ván đã kết thúc')}</h2>
-      <p>${escapeHtml(winner?.reason || '')}</p>
-    </section>
-    <section class="action-surface">
-      <div class="action-title">
-        <h3>Công bố vai trò</h3>
-      </div>
-      <div class="players">
-        ${store.state.players.map(renderPlayerCard).join('')}
-      </div>
-    </section>
-  `;
-}
-
-function renderSelfRole() {
-  const self = store.state.self;
-  if (!self?.role) {
-    return '';
-  }
-
-  const wolfPack = self.wolfPack?.length
-    ? `<div class="small"><strong>Đàn Sói:</strong> ${self.wolfPack
-        .map((wolf) => `${escapeHtml(wolf.name)} (${escapeHtml(wolf.role)})`)
-        .join(', ')}</div>`
-    : '';
-
-  const witchPotions = self.witchPotions
-    ? `<div class="small"><strong>Thuốc:</strong> Cứu ${self.witchPotions.save ? 'còn' : 'đã dùng'}, Giết ${
-        self.witchPotions.poison ? 'còn' : 'đã dùng'
-      }</div>`
-    : '';
-
-  return `
-    <section class="role-card">
-      <div class="role-heading">
-        <h3>${escapeHtml(self.role.displayName)}</h3>
-        <span class="tag ${roleClass(self.role)}">${escapeHtml(self.role.groupName)}</span>
-      </div>
-      <div class="small muted">Order ${self.role.order}${self.role.feature ? ' · Có chức năng' : ''}</div>
-      <p>${escapeHtml(self.role.description)}</p>
-      ${wolfPack}
-      ${self.inCult ? '<div class="small"><strong>Trạng thái:</strong> Thuộc Giáo phái</div>' : ''}
-      ${witchPotions}
-      ${self.alive ? '' : '<div class="notice small">Bạn đã chết và không thể tiếp tục gửi hành động.</div>'}
-    </section>
-  `;
-}
-
-function renderNightAction() {
-  const action = store.state.privateAction;
-
-  if (!store.state.self) {
-    return `<section class="action-surface"><div class="muted">Vào phòng để nhận hành động từ Quản Trò.</div></section>`;
-  }
-
-  if (!store.state.self.alive) {
-    return `<section class="action-surface"><div class="muted">Bạn đang quan sát ván chơi.</div></section>`;
-  }
-
-  if (!action) {
-    return `<section class="action-surface"><div class="muted">Chưa tới lượt vai trò của bạn.</div></section>`;
-  }
-
+function renderPlayerNightAction(action) {
   if (action.submitted) {
-    return `<section class="action-surface"><div class="notice small">Lựa chọn của bạn đã được gửi. Đang chờ các người chơi cùng lượt.</div></section>`;
+    return `
+      <div class="panel" style="background: rgba(16, 185, 129, 0.15);">
+        <h3>✅ ĐÃ GỬI HÀNH ĐỘNG</h3>
+        <p class="muted">Quản trò đã ghi nhận lựa chọn của bạn. Đang chờ các vai trò khác...</p>
+      </div>
+    `;
   }
 
   if (action.mode === 'witch') {
-    return renderWitchAction(action);
-  }
-
-  const selectedCount = store.selectedTargets.size;
-  return `
-    <section class="action-surface">
-      <div class="action-title">
-        <h3>${escapeHtml(action.title)}</h3>
-        <span class="tag">Chọn ${action.minTargets === action.maxTargets ? action.maxTargets : `${action.minTargets}-${action.maxTargets}`}</span>
-      </div>
-      <div class="muted">${escapeHtml(action.prompt)}</div>
-      ${renderTargetGrid(action.candidates, action.maxTargets)}
-      <div class="action-row">
-        <button class="button teal" type="button" data-action="submit-night-action" ${
-          selectedCount >= action.minTargets && selectedCount <= action.maxTargets ? '' : 'disabled'
-        }>Gửi lựa chọn</button>
-        <button class="button secondary" type="button" data-action="skip-night-action">Bỏ qua</button>
-      </div>
-    </section>
-  `;
-}
-
-function renderWitchAction(action) {
-  const currentOption = action.options.find((option) => option.type === store.witchType);
-  const canSubmit = currentOption && store.selectedTargets.size === 1;
-
-  return `
-    <section class="action-surface">
-      <div class="action-title">
-        <h3>${escapeHtml(action.title)}</h3>
-        <span class="tag">Một hành động</span>
-      </div>
-      <div class="muted">${escapeHtml(action.prompt)}</div>
-      <div class="option-row">
-        ${action.options
-          .map(
-            (option) => `
-              <button class="button ${store.witchType === option.type ? 'amber' : 'secondary'}" type="button" data-action="choose-witch" data-witch-type="${escapeAttr(option.type)}">
-                ${escapeHtml(option.label)}
-              </button>
-            `,
-          )
-          .join('')}
-      </div>
-      ${currentOption ? renderTargetGrid(currentOption.candidates, 1) : '<div class="small muted">Chọn loại thuốc để hiện mục tiêu.</div>'}
-      <div class="action-row">
-        <button class="button teal" type="button" data-action="submit-night-action" ${canSubmit ? '' : 'disabled'}>Gửi lựa chọn</button>
-        <button class="button secondary" type="button" data-action="skip-night-action">Bỏ qua</button>
-      </div>
-    </section>
-  `;
-}
-
-function renderDayVote() {
-  const day = store.state.day;
-  if (!day?.canVote) {
-    return `<section class="action-surface"><div class="muted">Bạn đang quan sát phần bỏ phiếu.</div></section>`;
-  }
-  if (day.submitted) {
-    return `<section class="action-surface"><div class="notice small">Phiếu của bạn đã được ghi nhận.</div></section>`;
-  }
-
-  return `
-    <section class="action-surface">
-      <div class="action-title">
-        <h3>Bỏ phiếu treo cổ</h3>
-        <span class="tag">${day.votesSubmitted}/${day.aliveCount}</span>
-      </div>
-      ${renderTargetGrid(day.candidates, 1)}
-      <div class="action-row">
-        <button class="button danger" type="button" data-action="submit-day-vote" ${store.selectedTargets.size === 1 ? '' : 'disabled'}>Gửi phiếu</button>
-        <button class="button secondary" type="button" data-action="skip-day-vote">Không treo ai</button>
-      </div>
-    </section>
-  `;
-}
-
-function renderTargetGrid(candidates, maxTargets) {
-  if (!candidates.length) {
-    return '<div class="notice small">Không có mục tiêu hợp lệ.</div>';
-  }
-
-  return `
-    <div class="target-grid">
-      ${candidates
-        .map((candidate) => {
-          const active = store.selectedTargets.has(candidate.id);
-          return `
-            <button
-              class="target-button ${active ? 'active' : ''}"
-              type="button"
-              data-action="toggle-target"
-              data-target-id="${escapeAttr(candidate.id)}"
-              data-max-targets="${maxTargets}"
-              ${candidate.disabled ? 'disabled' : ''}
-            >
-              <strong>${escapeHtml(candidate.name)}</strong>
-              ${candidate.reason ? `<div class="small">${escapeHtml(candidate.reason)}</div>` : ''}
+    return `
+      <div class="panel">
+        <h3>🧙‍♀️ ${action.title}</h3>
+        <p class="muted">${action.prompt}</p>
+        <div style="display: flex; gap: 8px; margin: 10px 0;">
+          ${action.options.map(opt => `
+            <button class="btn btn-sm ${store.witchType === opt.type ? 'btn-primary' : 'btn-outline'}" data-action="choose-witch" data-witch-type="${opt.type}">
+              ${opt.label}
             </button>
-          `;
-        })
-        .join('')}
+          `).join('')}
+        </div>
+
+        ${store.witchType ? `
+          <div class="target-selector-grid">
+            ${action.options.find(o => o.type === store.witchType)?.candidates.map(c => `
+              <div class="target-card ${store.selectedTargets.has(c.id) ? 'selected' : ''}" data-action="toggle-target" data-target-id="${c.id}" data-max-targets="1">
+                ${c.name}
+              </div>
+            `).join('')}
+          </div>
+          <button class="btn btn-primary" data-action="submit-night-action" style="margin-top: 12px; width: 100%;">
+            Xác Nhận Dùng Thuốc
+          </button>
+        ` : ''}
+
+        <button class="btn btn-outline btn-sm" data-action="skip-player-action" style="margin-top: 8px; width: 100%;">
+          Bỏ Qua Không Dùng Thuốc
+        </button>
+      </div>
+    `;
+  }
+
+  return `
+    <div class="panel">
+      <h3>🌙 ${action.title}</h3>
+      <p class="muted">${action.prompt}</p>
+
+      <div class="target-selector-grid">
+        ${action.candidates?.map(c => `
+          <div class="target-card ${c.disabled ? 'disabled' : ''} ${store.selectedTargets.has(c.id) ? 'selected' : ''}" 
+               data-action="${c.disabled ? '' : 'toggle-target'}" 
+               data-target-id="${c.id}" 
+               data-max-targets="${action.maxTargets}">
+            <div>${c.name}</div>
+            ${c.disabled ? `<div style="font-size: 0.75rem; color: #fca5a5;">${c.reason}</div>` : ''}
+          </div>
+        `).join('')}
+      </div>
+
+      <div style="display: flex; gap: 8px; margin-top: 12px;">
+        <button class="btn btn-primary" data-action="submit-night-action" style="flex: 1;" ${store.selectedTargets.size < action.minTargets ? 'disabled' : ''}>
+          Xác Nhận Hành Động
+        </button>
+        ${action.canSkip ? `
+          <button class="btn btn-outline" data-action="skip-player-action">
+            Bỏ Qua
+          </button>
+        ` : ''}
+      </div>
     </div>
   `;
 }
 
-function renderPrivateMessages() {
-  const messages = store.state.privateMessages || [];
-  if (!messages.length) {
-    return '';
+function renderPlayerDayVote(dayState) {
+  if (dayState.submitted) {
+    return `
+      <div class="panel" style="background: rgba(16, 185, 129, 0.15);">
+        <h3>✅ ĐÃ BỎ PHIẾU TREO CỔ</h3>
+        <p class="muted">Đang chờ các thành viên còn lại bỏ phiếu...</p>
+      </div>
+    `;
   }
 
   return `
-    <section class="panel">
-      <div class="panel-title">
-        <h3>Tin riêng</h3>
+    <div class="panel">
+      <h3>☀️ Bỏ Phiếu Treo Cổ Ban Ngày</h3>
+      <p class="muted">Chọn một người bạn nghi ngờ là Ma Sói để bỏ phiếu treo cổ:</p>
+
+      <div class="target-selector-grid">
+        ${dayState.candidates.map(c => `
+          <div class="target-card ${store.selectedTargets.has(c.id) ? 'selected' : ''}" data-action="toggle-target" data-target-id="${c.id}" data-max-targets="1">
+            ${c.name}
+          </div>
+        `).join('')}
       </div>
-      <div class="log-list">
-        ${messages
-          .slice()
-          .reverse()
-          .map(
-            (item) => `
-              <div class="log-item">
-                <span class="small muted">${formatTime(item.time)}</span>
-                <span>${escapeHtml(item.text)}</span>
-              </div>
-            `,
-          )
-          .join('')}
+
+      <div style="display: flex; gap: 8px; margin-top: 12px;">
+        <button class="btn btn-primary" data-action="submit-day-vote" style="flex: 1;" ${store.selectedTargets.size === 0 ? 'disabled' : ''}>
+          Bỏ Phiếu Treo Cổ
+        </button>
+        <button class="btn btn-outline" data-action="skip-day-vote">
+          Bỏ Qua Phiếu
+        </button>
       </div>
-    </section>
+    </div>
   `;
 }
 
-function renderLogPanel() {
-  const log = store.state.activityLog?.length ? store.state.activityLog : store.state.publicLog || [];
+function renderPlayerEnded() {
+  const winner = store.state.winner;
+  const self = store.state.self;
+
   return `
-    <section class="panel">
-      <div class="panel-title">
-        <h3>Nhật ký</h3>
+    <div class="player-layout">
+      <div class="panel" style="text-align: center;">
+        <h2 style="font-size: 1.8rem; color: var(--amber);">🏆 KẾT THÚC VÁN</h2>
+        <h3 style="color: var(--crimson); margin-top: 6px;">${winner?.name || ''}</h3>
+        <p class="muted">${winner?.reason || ''}</p>
+        <div class="pill teal" style="margin-top: 12px; display: inline-flex;">
+          Vai trò của bạn: ${self?.role?.displayName || ''}
+        </div>
       </div>
-      <div class="log-list">
-        ${
-          log.length
-            ? log
-                .slice()
-                .reverse()
-                .map(
-                  (item) => `
-                    <div class="log-item">
-                      <span class="small muted">${formatTime(item.time)}</span>
-                      <span>${escapeHtml(item.text)}</span>
-                    </div>
-                  `,
-                )
-                .join('')
-            : '<div class="small muted">Chưa có sự kiện.</div>'
-        }
+
+      <div class="panel">
+        <div class="panel-title">
+          <h3>Bảng tiết lộ vai trò tất cả người chơi</h3>
+        </div>
+        <table class="end-table">
+          <thead>
+            <tr>
+              <th>Người chơi</th>
+              <th>Vai trò</th>
+              <th>Kết quả</th>
+            </tr>
+          </thead>
+          <tbody>
+            ${store.state.players.map(p => `
+              <tr>
+                <td>${p.name}</td>
+                <td>${p.role?.displayName || '-'}</td>
+                <td>${p.alive ? '🟢 Sống' : '💀 Chết'}</td>
+              </tr>
+            `).join('')}
+          </tbody>
+        </table>
       </div>
-    </section>
+    </div>
   `;
-}
-
-function renderRoleBook() {
-  return `
-    <section class="panel">
-      <div class="panel-title">
-        <h3>Thứ tự gọi</h3>
-      </div>
-      <div class="book-list">
-        ${store.state.roles
-          .slice()
-          .sort((a, b) => a.order - b.order)
-          .map(
-            (role) => `
-              <div class="book-row">
-                <strong>Order ${role.order}: ${escapeHtml(role.displayName)}</strong>
-                <span class="tag ${roleClass(role)}">${escapeHtml(role.groupName)}</span>
-              </div>
-            `,
-          )
-          .join('')}
-      </div>
-    </section>
-  `;
-}
-
-function roleClass(role) {
-  if (role.group === 2) {
-    return 'role-wolf';
-  }
-  if (role.group === 3) {
-    return 'role-third';
-  }
-  return 'role-village';
-}
-
-function phaseLabel(phase) {
-  const labels = {
-    lobby: 'Phòng chờ',
-    night: 'Ban đêm',
-    day: 'Ban ngày',
-    ended: 'Kết thúc',
-  };
-  return labels[phase] || phase;
-}
-
-function formatTime(timestamp) {
-  return new Intl.DateTimeFormat('vi-VN', {
-    hour: '2-digit',
-    minute: '2-digit',
-    second: '2-digit',
-  }).format(new Date(timestamp));
-}
-
-function formatCountdown(ms) {
-  const remaining = Math.max(0, ms);
-  const totalSeconds = Math.ceil(remaining / 1000);
-  const minutes = Math.floor(totalSeconds / 60);
-  const seconds = totalSeconds % 60;
-  return `${String(minutes).padStart(2, '0')}:${String(seconds).padStart(2, '0')}`;
-}
-
-function escapeHtml(value) {
-  return String(value ?? '').replace(/[&<>"']/g, (char) => {
-    const entities = {
-      '&': '&amp;',
-      '<': '&lt;',
-      '>': '&gt;',
-      '"': '&quot;',
-      "'": '&#39;',
-    };
-    return entities[char];
-  });
-}
-
-function escapeAttr(value) {
-  return escapeHtml(value).replace(/`/g, '&#96;');
 }

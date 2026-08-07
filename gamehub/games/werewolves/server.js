@@ -6,7 +6,7 @@ const http = require('node:http');
 const path = require('node:path');
 
 function createWerewolvesApp(options = {}) {
-const MIN_PLAYERS = Number(options.minPlayers || process.env.MIN_PLAYERS || 3);
+const MIN_PLAYERS = Number(options.minPlayers || process.env.MIN_PLAYERS || 4);
 const MAX_PLAYERS = Number(options.maxPlayers || process.env.MAX_PLAYERS || 30);
 const DISCUSSION_MS = Number(options.discussionMs || process.env.DISCUSSION_MS || 5 * 60 * 1000);
 const ROOM_CODE = normalizeRoomCode(options.roomCode || process.env.ROOM_CODE) || createRoomCode();
@@ -33,11 +33,14 @@ const MIME_TYPES = {
   '.jpeg': 'image/jpeg',
 };
 
-const roleCatalog = parseRolesMarkdown(fs.readFileSync(ROLES_FILE, 'utf8'));
-
-if (!roleCatalog.length) {
-  throw new Error('Không đọc được vai trò nào từ roles.md');
-}
+const { t } = require('./i18n');
+const {
+  roleCatalog,
+  getRoleById,
+  buildNightCalls: buildOopNightCalls,
+  processNightCall: processOopNightCall,
+  triggerDeathHooks: triggerOopDeathHooks,
+} = require('./roles');
 
 let game = createGame();
 let dayTimer = null;
@@ -85,6 +88,31 @@ const requestListener = async (req, res) => {
       handleAction(body);
       broadcastState();
       return sendJson(res, 200, { ok: true });
+    }
+
+    if (req.method === 'POST' && requestUrl.pathname === '/api/skip-call') {
+      skipCurrentNightCall();
+      broadcastState();
+      return sendJson(res, 200, { ok: true });
+    }
+
+    if (req.method === 'POST' && requestUrl.pathname === '/api/force-resolve-day') {
+      resolveDay();
+      broadcastState();
+      return sendJson(res, 200, { ok: true });
+    }
+
+    if (req.method === 'POST' && requestUrl.pathname === '/api/leave') {
+      const body = await readJson(req);
+      const result = leavePlayer(body.playerId);
+      broadcastState();
+      return sendJson(res, 200, result);
+    }
+
+    if (req.method === 'POST' && requestUrl.pathname === '/api/close-room') {
+      const result = closeRoom();
+      broadcastState();
+      return sendJson(res, 200, result);
     }
 
     if (req.method === 'POST' && requestUrl.pathname === '/api/reset') {
@@ -313,6 +341,7 @@ function buildSettingsState() {
   const errors = settingsErrors(game.settings, game.players.size, true);
 
   return {
+    roomCode: ROOM_CODE,
     targetPlayerCount: game.settings.targetPlayerCount,
     minPlayers: MIN_PLAYERS,
     maxPlayers: MAX_PLAYERS,
@@ -433,6 +462,26 @@ function joinPlayer(body) {
   return { playerId: id, player: publicPlayer(player, false) };
 }
 
+function leavePlayer(playerId) {
+  if (!playerId || !game.players.has(playerId)) {
+    return { ok: true };
+  }
+
+  const player = game.players.get(playerId);
+  game.players.delete(playerId);
+  narrate(`${player.name} đã rời khỏi phòng.`);
+  recordActivity(`${player.name} đã rời khỏi phòng.`);
+  return { ok: true };
+}
+
+function closeRoom() {
+  resetGame(true);
+  game.players.clear();
+  narrate('Host đã giải thể phòng chơi.');
+  recordActivity('Host đã giải thể phòng chơi. Phòng đã đóng.');
+  return { ok: true };
+}
+
 function startGame() {
   if (game.phase !== 'lobby') {
     throw httpError(409, 'Ván đang chạy.');
@@ -519,116 +568,24 @@ function beginNight() {
 }
 
 function buildNightCalls() {
-  const calls = [];
-  const addRoleCall = (roleId, key, tts, prompt, minTargets, maxTargets) => {
-    const role = findRole(roleId);
-    if (!role) {
-      return;
-    }
-    calls.push({
-      key,
-      roleIds: [roleId],
-      title: role.displayName,
-      order: role.order,
-      sourceIndex: role.sourceIndex,
-      tts,
-      prompt,
-      minTargets,
-      maxTargets,
-    });
-  };
+  return buildOopNightCalls(game);
+}
 
-  addRoleCall(
-    'bao-ve',
-    'guard',
-    'Bảo vệ thức dậy. Hãy chọn một người để bảo vệ trong đêm nay.',
-    'Chọn một người còn sống để bảo vệ. Không được bảo vệ cùng một người ở hai đêm liên tiếp.',
-    1,
-    1,
-  );
+let nightAutoTimer = null;
 
-  if (game.round === 1) {
-    addRoleCall(
-      'me-tre',
-      'mother',
-      'Mẹ trẻ thức dậy. Hãy chọn một người để nuôi nấng.',
-      'Chọn một người còn sống. Nếu Mẹ trẻ chết, người này sẽ chết theo.',
-      1,
-      1,
-    );
+function clearNightAutoTimer() {
+  if (nightAutoTimer) {
+    clearTimeout(nightAutoTimer);
+    nightAutoTimer = null;
   }
+}
 
-  const wolfRoles = roleCatalog.filter((role) => role.group === 2);
-  if (wolfRoles.length) {
-    const firstWolfRole = [...wolfRoles].sort((a, b) => a.order - b.order || a.sourceIndex - b.sourceIndex)[0];
-    calls.push({
-      key: 'wolves',
-      roleIds: wolfRoles.map((role) => role.id),
-      title: 'Phe Ma sói',
-      order: firstWolfRole.order,
-      sourceIndex: firstWolfRole.sourceIndex,
-      tts:
-        game.wolfExtraKills > 0
-          ? 'Ma sói thức dậy. Vì Sói con đã chết, đêm nay đàn sói được chọn hai nạn nhân.'
-          : 'Ma sói thức dậy. Hãy cùng chọn một nạn nhân.',
-      prompt:
-        game.wolfExtraKills > 0
-          ? 'Chọn tối đa hai người không thuộc phe Sói để trả thù cho Sói con.'
-          : 'Chọn một người không thuộc phe Sói làm nạn nhân.',
-      minTargets: 1,
-      maxTargets: game.wolfExtraKills > 0 ? 2 : 1,
-    });
-  }
-
-  addRoleCall(
-    'truong-giao-phai',
-    'cult',
-    'Trưởng giáo phái thức dậy. Hãy chọn một người để gia nhập giáo phái.',
-    'Chọn một người còn sống chưa thuộc Giáo phái.',
-    1,
-    1,
-  );
-
-  addRoleCall(
-    'tien-tri',
-    'seer',
-    'Tiên tri thức dậy. Hãy chọn một người để kiểm tra.',
-    'Chọn một người để biết người đó có phải Ma sói hay không.',
-    1,
-    1,
-  );
-
-  addRoleCall(
-    'nha-tam-than-hoc',
-    'psychologist',
-    'Nhà tâm thần học thức dậy. Hãy chọn hai người để so sánh phe.',
-    'Chọn hai người còn sống để biết họ có cùng phe hay không.',
-    2,
-    2,
-  );
-
-  addRoleCall(
-    'tho-san',
-    'hunter',
-    'Thợ săn thức dậy. Hãy chọn mục tiêu sẽ bị kéo theo nếu bạn chết.',
-    'Chọn một người. Nếu bạn chết, người này sẽ chết ngay lập tức.',
-    1,
-    1,
-  );
-
-  addRoleCall(
-    'phu-thuy',
-    'witch',
-    'Phù thủy thức dậy. Hãy chọn dùng thuốc cứu hoặc thuốc giết nếu còn.',
-    'Chọn dùng một bình thuốc còn lại, hoặc bỏ qua.',
-    0,
-    1,
-  );
-
-  return calls.sort((a, b) => a.order - b.order || a.sourceIndex - b.sourceIndex);
+function roleIsInDeck(call) {
+  return [...game.players.values()].some(player => player.role && call.roleIds.includes(player.role.id));
 }
 
 function advanceNightCall() {
+  clearNightAutoTimer();
   if (game.phase !== 'night' || !game.night) {
     return;
   }
@@ -638,10 +595,20 @@ function advanceNightCall() {
 
   while (game.night.callIndex < game.night.calls.length) {
     const call = currentCall();
-    const expectedActors = expectedActorsForCall(call);
 
-    if (expectedActors.length > 0) {
+    if (roleIsInDeck(call)) {
+      const expectedActors = expectedActorsForCall(call);
       narrate(call.tts);
+
+      if (expectedActors.length > 0) {
+        return;
+      }
+
+      // If actor for this role is dead, narrate call and auto-advance after 5s
+      nightAutoTimer = setTimeout(() => {
+        advanceNightCall();
+        broadcastState();
+      }, 5000);
       return;
     }
 
@@ -649,6 +616,17 @@ function advanceNightCall() {
   }
 
   resolveNight();
+}
+
+function skipCurrentNightCall() {
+  if (game.phase !== 'night' || !game.night) {
+    return;
+  }
+  const call = currentCall();
+  if (call) {
+    recordActivity(`${call.title} đã bị Host bỏ qua.`);
+  }
+  advanceNightCall();
 }
 
 function handleAction(body) {
@@ -735,17 +713,17 @@ function normalizeWitchAction(player, action) {
   const option = options.find((item) => item.type === type);
 
   if (!option) {
-    throw httpError(400, 'Phù thủy chỉ có thể dùng một bình thuốc còn lại hoặc bỏ qua.');
+    throw httpError(400, t('err_witch_invalid_potion'));
   }
 
   const targetIds = uniqueArray(Array.isArray(action.targetIds) ? action.targetIds : [action.targetId].filter(Boolean));
   if (targetIds.length !== 1) {
-    throw httpError(400, 'Phù thủy cần chọn đúng một mục tiêu cho bình thuốc.');
+    throw httpError(400, t('err_witch_target_required'));
   }
 
   const allowed = new Set(option.candidates.map((candidate) => candidate.id));
   if (!allowed.has(targetIds[0])) {
-    throw httpError(400, 'Mục tiêu không hợp lệ cho bình thuốc này.');
+    throw httpError(400, t('err_invalid_target'));
   }
 
   return {
@@ -759,100 +737,10 @@ function normalizeWitchAction(player, action) {
 
 function processNightCall(call) {
   const actions = [...game.night.pendingActions.values()].filter((action) => !action.skip);
-
-  if (call.key === 'guard') {
-    for (const action of actions) {
-      const targetId = action.targetIds[0];
-      game.night.protectedIds.add(targetId);
-      game.guardLastTargets.set(action.actorId, targetId);
-    }
-    return;
-  }
-
-  if (call.key === 'mother') {
-    for (const action of actions) {
-      if (!game.motherBonds.has(action.actorId)) {
-        game.motherBonds.set(action.actorId, action.targetIds[0]);
-      }
-    }
-    return;
-  }
-
-  if (call.key === 'wolves') {
-    const selected = selectTopTargets(
-      actions.flatMap((action) => action.targetIds),
-      game.night.wolfKillLimit,
-      true,
-    );
-    game.night.wolfAttackIds = selected;
-    game.wolfExtraKills = 0;
-    return;
-  }
-
-  if (call.key === 'cult') {
-    for (const action of actions) {
-      const target = game.players.get(action.targetIds[0]);
-      if (target) {
-        game.cultMembers.add(target.id);
-        addPrivateMessage(target.id, 'Bạn đã được Trưởng giáo phái chọn gia nhập Giáo phái.');
-      }
-    }
-    return;
-  }
-
-  if (call.key === 'seer') {
-    for (const action of actions) {
-      const target = game.players.get(action.targetIds[0]);
-      const isWolf = target?.role?.group === 2;
-      addPrivateMessage(
-        action.actorId,
-        `Tiên tri kiểm tra ${target?.name || 'mục tiêu'}: ${isWolf ? 'là Ma sói' : 'không phải Ma sói'}.`,
-      );
-    }
-    return;
-  }
-
-  if (call.key === 'psychologist') {
-    for (const action of actions) {
-      const [firstId, secondId] = action.targetIds;
-      const first = game.players.get(firstId);
-      const second = game.players.get(secondId);
-      const sameGroup = first?.role?.group === second?.role?.group;
-      addPrivateMessage(
-        action.actorId,
-        `${first?.name || 'Người thứ nhất'} và ${second?.name || 'người thứ hai'} ${
-          sameGroup ? 'cùng phe' : 'khác phe'
-        }.`,
-      );
-    }
-    return;
-  }
-
-  if (call.key === 'hunter') {
-    for (const action of actions) {
-      game.hunterTargets.set(action.actorId, action.targetIds[0]);
-    }
-    return;
-  }
-
-  if (call.key === 'witch') {
-    for (const action of actions) {
-      const potions = game.witchPotions.get(action.actorId);
-      if (!potions) {
-        continue;
-      }
-
-      const targetId = action.targetIds[0];
-      if (action.type === 'save' && potions.save) {
-        game.night.savedByWitchIds.add(targetId);
-        potions.save = false;
-      }
-      if (action.type === 'poison' && potions.poison) {
-        game.night.poisonedIds.add(targetId);
-        potions.poison = false;
-      }
-    }
-  }
+  processOopNightCall(call, actions, game, {
+    selectTopTargets,
+    addPrivateMessage,
+  });
 }
 
 function resolveNight() {
@@ -871,15 +759,16 @@ function resolveNight() {
     }
   }
 
-  const deaths = eliminatePlayers([...deathIds], 'chết trong đêm');
+  const deaths = eliminatePlayers([...deathIds], t('msg_dead_status'));
   game.night.deaths = deaths;
 
   if (deaths.length === 0) {
-    narrate('Trời sáng. Đêm qua không ai chết.');
-    recordActivity('Trời sáng. Đêm qua không ai chết.');
+    narrate(t('log_morning_no_deaths'));
+    recordActivity(t('log_morning_no_deaths'));
   } else {
-    narrate(`Trời sáng. Người chết trong đêm: ${deaths.map((death) => death.name).join(', ')}.`);
-    recordActivity(`Trời sáng. Người chết trong đêm: ${deaths.map((death) => death.name).join(', ')}.`);
+    const names = deaths.map((death) => death.name).join(', ');
+    narrate(t('log_morning_deaths', { names }));
+    recordActivity(t('log_morning_deaths', { names }));
   }
 
   if (maybeEndGame()) {
@@ -896,31 +785,31 @@ function beginDay(deaths) {
     discussionEndsAt: Date.now() + DISCUSSION_MS,
     deaths,
   };
-  narrate(`Ban ngày bắt đầu. Làng có ${Math.round(DISCUSSION_MS / 60000)} phút thảo luận trước khi treo cổ.`);
-  recordActivity('Ban ngày bắt đầu.');
+  narrate(t('log_discussion_time', { minutes: Math.round(DISCUSSION_MS / 60000) }));
+  recordActivity(t('log_day_begin'));
   scheduleDayTimer();
 }
 
 function handleDayAction(player, action) {
   if (!player.alive) {
-    throw httpError(403, 'Người chơi đã chết không thể bỏ phiếu.');
+    throw httpError(403, t('err_player_dead'));
   }
 
   if (game.day.votes.has(player.id)) {
-    throw httpError(409, 'Bạn đã bỏ phiếu trong ngày này.');
+    throw httpError(409, t('err_already_voted'));
   }
 
   const targetId = action.skip ? null : String(action.targetId || '');
   if (targetId) {
     const target = game.players.get(targetId);
     if (!target || !target.alive || target.id === player.id) {
-      throw httpError(400, 'Phiếu treo cổ không hợp lệ.');
+      throw httpError(400, t('err_invalid_vote'));
     }
   }
 
   game.day.votes.set(player.id, targetId);
-  narrate(`${player.name} đã bỏ phiếu.`);
-  recordActivity(`${player.name} đã bỏ phiếu.`);
+  narrate(t('log_player_voted', { name: player.name }));
+  recordActivity(t('log_player_voted', { name: player.name }));
 
   if (game.day.votes.size >= livePlayers().length) {
     resolveDay();
@@ -934,6 +823,9 @@ function resolveDay() {
 
   clearDayTimer();
 
+  const totalVoters = livePlayers().length;
+  const majorityThreshold = Math.floor(totalVoters / 2) + 1;
+
   const votes = [...game.day.votes.values()].filter(Boolean);
   const tally = tallyTargets(votes);
   const sorted = [...tally.entries()].sort((a, b) => b[1] - a[1]);
@@ -943,18 +835,21 @@ function resolveDay() {
     const topScore = sorted[0][1];
     const tiedTop = sorted.filter(([, score]) => score === topScore);
 
-    if (tiedTop.length === 1) {
+    if (tiedTop.length === 1 && topScore >= majorityThreshold) {
       const target = game.players.get(tiedTop[0][0]);
-      eliminated = eliminatePlayers([target.id], 'bị làng treo cổ');
-      narrate(`${target.name} bị làng treo cổ với ${topScore} phiếu.`);
-      recordActivity(`${target.name} bị làng treo cổ với ${topScore} phiếu.`);
+      eliminated = eliminatePlayers([target.id], t('msg_dead_status'));
+      narrate(t('log_lynched_success', { name: target.name, topScore, totalVoters }));
+      recordActivity(t('log_lynched_success', { name: target.name, topScore, totalVoters }));
+    } else if (topScore < majorityThreshold) {
+      narrate(t('log_lynched_majority_failed', { threshold: majorityThreshold }));
+      recordActivity(t('log_lynched_majority_failed', { threshold: majorityThreshold }));
     } else {
-      narrate('Làng hòa phiếu. Không ai bị treo cổ hôm nay.');
-      recordActivity('Làng hòa phiếu. Không ai bị treo cổ hôm nay.');
+      narrate(t('log_lynched_tied'));
+      recordActivity(t('log_lynched_tied'));
     }
   } else {
-    narrate('Làng không treo cổ ai hôm nay.');
-    recordActivity('Làng không treo cổ ai hôm nay.');
+    narrate(t('log_no_lynch'));
+    recordActivity(t('log_no_lynch'));
   }
 
   if (maybeEndGame()) {
@@ -985,30 +880,9 @@ function eliminatePlayers(playerIds, reason) {
       reason,
     };
     deaths.push(death);
-    addPrivateMessage(player.id, `Bạn đã chết: ${reason}.`);
+    addPrivateMessage(player.id, t('msg_you_are_dead'));
 
-    if (player.role?.id === 'soi-con') {
-      game.wolfExtraKills = Math.max(game.wolfExtraKills, 1);
-      narrate('Sói con đã chết. Đêm tiếp theo, đàn Sói có thể chọn hai nạn nhân.');
-    }
-
-    if (player.role?.id === 'me-tre') {
-      const bondedId = game.motherBonds.get(player.id);
-      const bonded = bondedId ? game.players.get(bondedId) : null;
-      if (bonded?.alive) {
-        queue.push(bonded.id);
-        narrate(`${bonded.name} chết theo Mẹ trẻ.`);
-      }
-    }
-
-    if (player.role?.id === 'tho-san') {
-      const targetId = game.hunterTargets.get(player.id);
-      const target = targetId ? game.players.get(targetId) : null;
-      if (target?.alive) {
-        queue.push(target.id);
-        narrate(`${target.name} bị Thợ săn kéo theo.`);
-      }
-    }
+    triggerOopDeathHooks(player, game, queue);
   }
 
   return deaths;
@@ -1025,8 +899,8 @@ function maybeEndGame() {
   game.night = null;
   game.day = null;
   clearDayTimer();
-  narrate(`Ván chơi kết thúc. ${winner.name} thắng. ${winner.reason}`);
-  recordActivity(`Ván chơi kết thúc. ${winner.name} thắng.`);
+  narrate(t('win_announcement', { name: winner.name, reason: winner.reason }));
+  recordActivity(t('win_announcement', { name: winner.name, reason: winner.reason }));
   broadcastState();
   return true;
 }
@@ -1034,7 +908,7 @@ function maybeEndGame() {
 function checkWinner() {
   const alive = livePlayers();
   if (alive.length === 0) {
-    return { key: 'none', name: 'Không phe nào', reason: 'Không còn người chơi sống sót.' };
+    return { key: 'none', name: t('win_none_name'), reason: t('win_none_reason') };
   }
 
   const cultLeaderAlive = alive.some((player) => player.role?.id === 'truong-giao-phai');
@@ -1083,57 +957,10 @@ function candidateIdsForCall(player, call) {
 }
 
 function candidatesForCall(player, call) {
-  const alive = livePlayers();
-
-  if (call.key === 'guard') {
-    const lastTarget = game.guardLastTargets.get(player.id);
-    return alive.map((candidate) => ({
-      id: candidate.id,
-      name: candidate.name,
-      disabled: candidate.id === lastTarget,
-      reason: candidate.id === lastTarget ? 'Đã bảo vệ đêm trước' : '',
-    }));
+  const role = getRoleById(call.roleIds[0]);
+  if (role && typeof role.getCandidates === 'function') {
+    return role.getCandidates(player, game, call.key);
   }
-
-  if (call.key === 'mother') {
-    return alive
-      .filter((candidate) => candidate.id !== player.id)
-      .map((candidate) => ({ id: candidate.id, name: candidate.name }));
-  }
-
-  if (call.key === 'wolves') {
-    return alive
-      .filter((candidate) => candidate.role?.group !== 2)
-      .map((candidate) => ({ id: candidate.id, name: candidate.name }));
-  }
-
-  if (call.key === 'cult') {
-    return alive
-      .filter((candidate) => candidate.id !== player.id)
-      .map((candidate) => ({
-        id: candidate.id,
-        name: candidate.name,
-        disabled: game.cultMembers.has(candidate.id),
-        reason: game.cultMembers.has(candidate.id) ? 'Đã thuộc Giáo phái' : '',
-      }));
-  }
-
-  if (call.key === 'seer') {
-    return alive
-      .filter((candidate) => candidate.id !== player.id)
-      .map((candidate) => ({ id: candidate.id, name: candidate.name }));
-  }
-
-  if (call.key === 'psychologist') {
-    return alive.map((candidate) => ({ id: candidate.id, name: candidate.name }));
-  }
-
-  if (call.key === 'hunter') {
-    return alive
-      .filter((candidate) => candidate.id !== player.id)
-      .map((candidate) => ({ id: candidate.id, name: candidate.name }));
-  }
-
   return [];
 }
 
@@ -1187,6 +1014,7 @@ function buildState(playerId) {
   return {
     phase: game.phase,
     round: game.round,
+    roomCode: ROOM_CODE,
     minPlayers: MIN_PLAYERS,
     playerCount: game.players.size,
     serverTime: Date.now(),
@@ -1601,6 +1429,19 @@ function cloneSettings(settings) {
 
 function serveStatic(rawPathname, res) {
   const pathname = rawPathname === '/' ? '/index.html' : decodeURIComponent(rawPathname);
+
+  if (pathname.startsWith('/i18n/')) {
+    const i18nFilePath = path.normalize(path.join(ROOT_DIR, pathname));
+    if (i18nFilePath.startsWith(path.join(ROOT_DIR, 'i18n'))) {
+      fs.readFile(i18nFilePath, (error, content) => {
+        if (error) return sendJson(res, 404, { error: 'Không tìm thấy file.' });
+        res.writeHead(200, { 'Content-Type': 'application/javascript; charset=utf-8' });
+        return res.end(content);
+      });
+      return;
+    }
+  }
+
   const filePath = path.normalize(path.join(PUBLIC_DIR, pathname));
 
   if (filePath !== PUBLIC_DIR && !filePath.startsWith(`${PUBLIC_DIR}${path.sep}`)) {
