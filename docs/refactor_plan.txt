@@ -1,0 +1,7 @@
+1/ refactor game thành dạng module:
+các role được chia thành file để có thể import role sau này, thiết kế chuẩn oop, ví dụ sói được định nghĩa tại file wolf.js, khi bắt đầu chơi sẽ import file wolf.js
+màn hình host và player đều được chia thành 2 file riêng biệt: host.js và player.js
+
+2/ tăng số lượng người chơi tối thiểu lên thành 4, vì 3 sẽ kết thúc ngay khi đêm kết thúc (sói == dân)
+
+3/ refactor localization vào thư mục l18n: vi.js và en.js, và có thêm chức năng chọn ngôn ngữ.
